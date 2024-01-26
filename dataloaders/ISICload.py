@@ -14,7 +14,23 @@ import numpy as np
 import funcy
 import matplotlib.pyplot as plt
 import json
+import random
 
+def rotate90(image, label, prob=0.2, extra_labels=None, square=True):
+    '''
+    Rotate image & label in angle that equals N(0,1,2,3) * 90 degree
+    '''
+    if random.random() < prob:
+        if square:
+            k = random.choice([1, 2, 3])
+        else:
+            k = 2   # only 180 degree for non_square size
+        image = np.rot90(image, k, axes=(0, 1)).copy()  # along HW plane
+        label = np.rot90(label, k, axes=(0, 1)).copy()
+        extra_labels = np.rot90(extra_labels, k, axes=(0, 1)).copy()
+
+    return image, label, extra_labels
+    
 unloader = ToPILImage()
 def imshow(tensor):
 	image = unloader(tensor)
@@ -61,13 +77,11 @@ class ISIC(Dataset):
 	def __len__(self):
 		# print(self.data)
 
-		return len(self.ids) # 200 * 3
+		return len(self.ids)
 
 	def __getitem__(self, i):
-		# idx, augmentation = self.data[i]
-		# print(idx, augmentation)
+
 		idx= self.ids[i]
-		# augmentation = self.data[i]
 		fullPathName = os.path.join(self.img_dir, idx)
 		fullPathName = fullPathName.replace('\\', '/')
 		img = self._load_input_image(fullPathName)
@@ -75,10 +89,6 @@ class ISIC(Dataset):
 
 		if self.input_preprocess is not None:
 			img = self.input_preprocess(img)
-
-		# img = augmentation(img)
-		img = self.to_tensor(img)
-		img = self.normalize(img)
 
 		# get mask
 		MaskPathName = os.path.join(self.mask_dir, idx)
@@ -98,15 +108,19 @@ class ISIC(Dataset):
 		if self.load_superpixel_label:
 			superpixel_dir = '/'.join(self.mask_dir.split('/')[0:3] + ["superpixel_labels"])
 			superpixelPathName = os.path.join(superpixel_dir, idx)
-   
+
 			superpixelPathName = superpixelPathName + '.json'
 			with open(superpixelPathName, 'r') as f:
 				superpixel = json.load(f)
 				superpixel = np.array(superpixel)
-		# if self.target_preprocess is not None:
-		# 	Mask = self.target_preprocess(Mask)
+    
+			img, Mask, superpixel = rotate90(img, Mask, extra_labels=superpixel, square=True)
+
+		img = self.to_tensor(img)
+		img = self.normalize(img)
+
 		Mask = self.to_tensor(Mask)
-		# print(Mask.size())
+
 		if self.load_superpixel_label:
 			superpixel =  self.to_tensor(superpixel)
 			return {'image': img, 'mask': Mask,'superpixel':superpixel, 'name': idx}

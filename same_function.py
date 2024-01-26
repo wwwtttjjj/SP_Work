@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from networks.DD import UnFNet_singal
 import torch.nn.functional as F
 from dataloaders.dataset import TwoStreamBatchSampler
 from dataloaders.ISICload import ISIC
@@ -16,11 +17,12 @@ from utils import ramps,dice_score
 import ipdb
 import torch.nn as nn
 from lib.models import nnU_net
-
+import os
+# os.environ["WANDB_DISABLED"] = "true"
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--labeled_bs", type=int, default=1, help='labeled_batch_size')
+    parser.add_argument("--labeled_bs", type=int, default=2, help='labeled_batch_size')
     parser.add_argument("--max_iterations", type=int, default=15000,
                         help="maxiumn epoch to train")
     ######################################################
@@ -41,26 +43,34 @@ def get_args():
     parser.add_argument('--deterministic', type=int, default=0,
                         help='whether use deterministic training')
     parser.add_argument('--seed', type=int, default=1337, help='random seed')
-    parser.add_argument('--base_lr', type=float, default=0.0001,
+    parser.add_argument('--base_lr', type=float, default=1e-4,
                         help='segmentation network learning rate')
     parser.add_argument('--num_classes', type=int, default=1,
                         help='output channel of network')
-    parser.add_argument('--batch_size', type=int, default=4,
+    parser.add_argument('--batch_size', type=int, default=6,
                         help='batch_size per gpu')
     parser.add_argument('--temperature', type=float, default=0.1, help='temperature of sharpening')
     parser.add_argument('--gpu', type=int, default=0, help='GPU to use')
     parser.add_argument('--label_unlabel', type=str, default='100-1400', help='100-1400,300-1200,500-1000')
+    parser.add_argument('--baseline', type=int, default=100, help='100, 1500')
+    
     parser.add_argument('--threshold', type=float, default=0.5, help="the threshold of winner (superPixel block)")
-	
     args = parser.parse_args()
+    device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
+    args.device = device
     return args
-
 # def evaluate_jaccard(outputs, targets):
 #     eps = 1e-15
 #     intersection = (outputs * targets).sum()
 #     union = outputs.sum() + targets.sum()
 #     jaccard = (intersection + eps) / (union - intersection + eps)
 #     return jaccard
+def create_model(args, ema=False):
+    model = UnFNet_singal(3, 2, args.device, l_rate=args.base_lr, pretrained=True, has_dropout=ema)
+    if ema:
+        for param in model.parameters():
+            param.detach_()  # TODO:反向传播截断
+    return model
 
 def calculate_iou(matrix1, matrix2):
     intersection = np.logical_and(matrix1, matrix2)
@@ -89,47 +99,48 @@ def update_ema_variables(model, ema_model, alpha, global_step):
 		ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
 
 #val_epoch
-def val_epoch(phase, epoch, model, dataloader,device, experiment, args, name = "SP.txt"):
-	
-	progress_bar = tqdm(dataloader, desc="Epoch {} - {}".format(epoch, phase))
-	val = phase == "val"
+def val_epoch(phase, epoch, model, dataloader,device, experiment, args):
+    progress_bar = tqdm(dataloader, desc="Epoch {} - {}".format(epoch, phase))
+    val = phase == "val"
 
-	if val:
-		model.eval()
+    if val:
+        model.eval()
 
-	# jacces = []
-	dices = []
-	ioues = []
+    # jacces = []
+    dices = []
+    ioues = []
 
 
-	for data in progress_bar:
-		volume_batch, label_batch = data["image"], data["mask"]
+    for data in progress_bar:
+        volume_batch, label_batch = data["image"], data["mask"]
 
-		volume_batch = volume_batch.to(device, dtype=torch.float32)
-		label_batch = label_batch.to(device, dtype=torch.long)
-		with torch.no_grad():
-			mask_pred = model(volume_batch)
-		mask_true = label_batch.squeeze(dim=1)
-		mask_true = F.one_hot(mask_true, 2).permute(0, 3, 1, 2).float().cpu()
-		mask_pred_0 = F.one_hot(mask_pred.argmax(dim=1), 2).permute(0, 3, 1, 2).float().cpu()
-		# jacc = evaluate_jaccard(mask_pred_0[:, 1:2, ...], mask_true[:, 1:2, ...])
-		dice = dice_score.dice_coeff(mask_pred_0[:, 1:2, ...], mask_true[:, 1:2, ...], reduce_batch_first=False)
-		iou = calculate_iou(np.array(mask_pred_0[:, 1:2, ...].to('cpu')),np.array(mask_true[:, 1:2, ...].to('cpu')))
+        volume_batch = volume_batch.to(device, dtype=torch.float32)
+        label_batch = label_batch.to(device, dtype=torch.long)
+        with torch.no_grad():
+            mask_pred = model(volume_batch)
+        mask_true = label_batch.squeeze(dim=1)
+        mask_true = F.one_hot(mask_true, 2).permute(0, 3, 1, 2).float().cpu()
+        mask_pred_0 = F.one_hot(mask_pred.argmax(dim=1), 2).permute(0, 3, 1, 2).float().cpu()
+        # jacc = evaluate_jaccard(mask_pred_0[:, 1:2, ...], mask_true[:, 1:2, ...])
+        dice = dice_score.dice_coeff(mask_pred_0[:, 1:2, ...], mask_true[:, 1:2, ...], reduce_batch_first=False)
+        iou = calculate_iou(np.array(mask_pred_0[:, 1:2, ...].to('cpu')),np.array(mask_true[:, 1:2, ...].to('cpu')))
 
-		# jacces.append(jacc)
-		dices.append(dice)
-		ioues.append(iou)
+        # jacces.append(jacc)
+        dices.append(dice)
+        ioues.append(iou)
 
-		progress_bar.set_postfix(dices=np.mean(dices), ioues = np.mean(ioues))
+        progress_bar.set_postfix(dices=np.mean(dices), ioues = np.mean(ioues))
 
-	info = {"dice":round(np.mean(dices), 5),"iou":round(np.mean(ioues), 5)}
-	experiment.log({
-		'dice': round(np.mean(dices), 5),
-		"iou": round(np.mean(ioues), 5)
-	})
-	if epoch >= 190:
-		save_results(path = name, result = info, args = args)
-	return info
+    info = {"dice":round(np.mean(dices), 5),"iou":round(np.mean(ioues), 5)}
+    experiment.log({
+        'dice': round(np.mean(dices), 5),
+        "iou": round(np.mean(ioues), 5)
+    })
+    if epoch >= 190:
+        save_results(path = args.save_name, result = info, args = args)
+        if epoch == 199:
+            torch.save(model.state_dict(), args.save_last_name)
+    return info
 
 def get_data(args):
 	labeled = {'100-1400':100,'300-1200':300,'500-1000':500}
@@ -171,43 +182,43 @@ def update_ema_variables(model, ema_model, alpha, global_step):
 	for ema_param, param in zip(ema_model.parameters(), model.parameters()):
 		ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
 
-def create_model(args, ema = False):
-    pool_op_kernel_sizes = [
-        [2, 2],
-        [2, 2],
-        [2, 2],
-        [2, 2],
-        [2, 2],
-    ]
-    conv_kernel_sizes = [[3, 3], [3, 3], [3, 3], [3, 3], [3, 3], [3, 3]]
-    net_params = {
-        "input_channels": 3,
-        "base_num_features": 32,
-        "num_classes": 2,
-        "num_pool": len(pool_op_kernel_sizes),
-        "num_conv_per_stage": 2,
-        "feat_map_mul_on_downscale": 2,
-        "conv_op": nn.Conv2d,
-        "norm_op": nn.BatchNorm2d,
-        "norm_op_kwargs": {"eps": 1e-5, "affine": True},
-        "dropout_op": nn.Dropout2d,
-        "dropout_op_kwargs": {"p": 0, "inplace": True},
-        "nonlin": nn.LeakyReLU,
-        "nonlin_kwargs": {"negative_slope": 1e-2, "inplace": True},
-        "deep_supervision": False,
-        "dropout_in_localization": False,
-        "final_nonlin": lambda x: x,
-        "pool_op_kernel_sizes": pool_op_kernel_sizes,
-        "conv_kernel_sizes": conv_kernel_sizes,
-        "upscale_logits": False,
-        "convolutional_pooling": True,
-        "convolutional_upsampling": True,
-    }
+# def create_model(args, ema = False):
+#     pool_op_kernel_sizes = [
+#         [2, 2],
+#         [2, 2],
+#         [2, 2],
+#         [2, 2],
+#         [2, 2],
+#     ]
+#     conv_kernel_sizes = [[3, 3], [3, 3], [3, 3], [3, 3], [3, 3], [3, 3]]
+#     net_params = {
+#         "input_channels": 3,
+#         "base_num_features": 32,
+#         "num_classes": 2,
+#         "num_pool": len(pool_op_kernel_sizes),
+#         "num_conv_per_stage": 2,
+#         "feat_map_mul_on_downscale": 2,
+#         "conv_op": nn.Conv2d,
+#         "norm_op": nn.BatchNorm2d,
+#         "norm_op_kwargs": {"eps": 1e-5, "affine": True},
+#         "dropout_op": nn.Dropout2d,
+#         "dropout_op_kwargs": {"p": 0, "inplace": True},
+#         "nonlin": nn.LeakyReLU,
+#         "nonlin_kwargs": {"negative_slope": 1e-2, "inplace": True},
+#         "deep_supervision": False,
+#         "dropout_in_localization": False,
+#         "final_nonlin": lambda x: x,
+#         "pool_op_kernel_sizes": pool_op_kernel_sizes,
+#         "conv_kernel_sizes": conv_kernel_sizes,
+#         "upscale_logits": False,
+#         "convolutional_pooling": True,
+#         "convolutional_upsampling": True,
+#     }
 
-    net = nnU_net.Generic_UNet(**net_params)
-    net = net.to(args.device)
+#     net = nnU_net.Generic_UNet(**net_params)
+#     net = net.to(args.device)
     
-    if ema:
-        for param in net.parameters():
-            param.detach_()  # TODO:反向传播截断
-    return net
+#     if ema:
+#         for param in net.parameters():
+#             param.detach_()  # TODO:反向传播截断
+#     return net

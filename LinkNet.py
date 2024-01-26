@@ -5,19 +5,17 @@ import torch
 from torch.utils.data import DataLoader
 import random
 from tqdm import tqdm
-from networks.DD import UnFNet_singal
 
 from dataloaders.ISICload import ISIC
-import funcy
 import torch.backends.cudnn as cudnn
 from torch.nn.modules.loss import CrossEntropyLoss
-from same_function import get_args,val_epoch,available_conditioning
+from same_function import get_args,val_epoch,available_conditioning,create_model
 import ipdb
 import wandb
-import os
-os.environ["WANDB_DISABLED"] = "true"
+from utils.losses import DiceLoss
+from torch.utils.data import DataLoader, SubsetRandomSampler
 
-
+dice_loss = DiceLoss(2)
 "wandb initial"
 experiment = wandb.init(project='SP',name='LinKNet_test', resume='allow', anonymous='must')
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))  
@@ -27,84 +25,76 @@ if not os.path.exists(fs_observer):
 np.set_printoptions(threshold=np.inf)
 
 args = get_args()
+save_name = "LinkNet" + str(args.baseline) + ".txt"
+save_best_name = "LinkNet_best_" + str(args.baseline) + '.pth'
+save_last_name = "LinkNet_last_" + str(args.baseline) + '.pth'
 
-save_best_name = "LinkNet_best.pth"
+args.save_name = save_name
+args.save_best_name = save_best_name
+args.save_last_name = save_last_name
+
 device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
 
 def get_data(args):
-	labeled = {'100-1400':100,'300-1200':300,'500-1000':500}
-	train_preprocess_fn = available_conditioning["original"]
-	val_preprocess_fn = available_conditioning['original']
-	# 载入数据
-	db_train = ISIC(args.imgdir, args.labeldir, size=args.img_size, augmentations=None,
-						 target_preprocess=train_preprocess_fn, phase='training')
+    train_preprocess_fn = available_conditioning["original"]
+    val_preprocess_fn = available_conditioning['original']
+    # 载入数据
+    db_train = ISIC(args.imgdir, args.labeldir, size=args.img_size, augmentations=None,
+                            target_preprocess=train_preprocess_fn, phase='training')
 
-	db_val = ISIC(args.valdir, args.valsegdir, size=args.img_size, augmentations=None,
-					   target_preprocess=val_preprocess_fn, phase='val')
-	total_slices = len(db_train)
+    db_val = ISIC(args.valdir, args.valsegdir, size=args.img_size, augmentations=None,
+                        target_preprocess=val_preprocess_fn, phase='val')
+    
+    total_slices = len(db_train)
+    subset_indices = list(range(args.baseline))
+    sampler = SubsetRandomSampler(subset_indices)
 
+    dataloaders = {
+        "train": DataLoader(db_train, batch_size=args.labeled_bs, num_workers=0, pin_memory=True, sampler=sampler),
+        "validation": DataLoader(db_val, batch_size=1, num_workers=0, pin_memory=True, shuffle=False)
+    }
 
-	dataloaders = {}
-	dataloaders["train"] = DataLoader(db_train,batch_size=args.batch_size,num_workers=0, pin_memory=True)
-	dataloaders["validation"] = DataLoader(db_val, batch_size=1, num_workers=0, pin_memory=True, shuffle=False)
-	return dataloaders,total_slices
+    return dataloaders,total_slices
 
 #train_epoch
 def train_epoch(phase, epoch, model, dataloader, loss_fn):
-	progress_bar = tqdm(dataloader, desc="Epoch {} - {}".format(epoch, phase))
-	training = phase == "train"
+    progress_bar = tqdm(dataloader, desc="Epoch {} - {}".format(epoch, phase))
+    training = phase == "train"
+    losses_unet = []
+    iter_num = 0
 
-	losses_unet = []
-	iter_num = 0
-	
-	if training:
-		model.train()
+    if training:
+        model.train()
 
-	for data in progress_bar:
-		volume_batch, label_batch = data["image"], data["mask"]
-		volume_batch = volume_batch.to(device, dtype=torch.float32)
-		targets = label_batch.to(device, dtype=torch.long)
+    for data in progress_bar:
+        volume_batch, label_batch = data["image"], data["mask"]
+        volume_batch = volume_batch.to(device, dtype=torch.float32)
+        targets = label_batch.to(device, dtype=torch.long)
 
-		targets = targets[:args.labeled_bs].squeeze(dim=1)
+        targets = targets[:args.labeled_bs].squeeze(dim=1)
 
-		outputs = model(volume_batch)
+        outputs = model(volume_batch)
+        outputs_soft = torch.sigmoid(outputs)
+        loss = torch.mean(loss_fn(outputs_soft[:args.labeled_bs], targets)) + dice_loss(outputs_soft[:args.labeled_bs], targets.unsqueeze(1))
 
-		loss = torch.mean(loss_fn(outputs[:args.labeled_bs], targets))
+        model.zero_grad()
+        loss.backward()
+        model.optimize()
 
-		model.zero_grad()
-		loss.backward()
-		model.optimize()
+        iter_num = iter_num + 1
+        losses_unet.append(loss.item())
 
+        progress_bar.set_postfix(loss_unet=np.mean(losses_unet))
+        if iter_num % 2000 == 0:
+            model.update_lr()
 
-
-		iter_num = iter_num + 1
-		losses_unet.append(loss.item())
-
-		progress_bar.set_postfix(loss_unet=np.mean(losses_unet))
-		if iter_num % 2000 == 0:
-			model.update_lr()
-
-	mean_loss = np.mean(losses_unet)
-
-	info = {"loss": mean_loss,
-			}
-
-	return info
+    mean_loss = np.mean(losses_unet)
+    info = {"loss": mean_loss,
+        }
+    return info
 
 def main(args, device):
-    base_lr = args.base_lr
-
-    def create_model(ema=False):
-        # Network definition
-        # =======Net========
-        # 暂时为False 没有dropout
-        model = UnFNet_singal(3, 2, device, l_rate=base_lr, pretrained=True, has_dropout=ema)
-        if ema:
-            for param in model.parameters():
-                param.detach_()  # TODO:反向传播截断
-        return model
-
-    model = create_model()
+    model = create_model(args)
 
     best_model_path = os.path.join(fs_observer, save_best_name)
 
@@ -118,7 +108,7 @@ def main(args, device):
 
     for epoch in epochs:
         info["train"] = train_epoch("train", epoch, model=model, dataloader=dataloaders["train"], loss_fn=loss_fn)
-        info["validation"] = val_epoch("val", epoch, model=model, dataloader=dataloaders["validation"],device=device,experiment=experiment,args=args,name="LinkNet.txt")
+        info["validation"] = val_epoch("val", epoch, model=model, dataloader=dataloaders["validation"],device=device,experiment=experiment,args=args)
         
         if info["validation"][best_metric] > best_value:
             best_value= info["validation"][best_metric]
