@@ -18,7 +18,6 @@ import ipdb
 import torch.nn as nn
 from lib.models import nnU_net
 import os
-# os.environ["WANDB_DISABLED"] = "true"
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -53,11 +52,17 @@ def get_args():
     parser.add_argument('--gpu', type=int, default=0, help='GPU to use')
     parser.add_argument('--label_unlabel', type=str, default='100-1400', help='100-1400,300-1200,500-1000')
     parser.add_argument('--baseline', type=int, default=100, help='100, 1500')
+    parser.add_argument('--epoch_unlabeled', type=int, default=50, help='when to start unlabeled data')
+    
+    parser.add_argument('--wandb', type=bool, default="true", help="wandb true or false")
+    
     
     parser.add_argument('--threshold', type=float, default=0.5, help="the threshold of winner (superPixel block)")
     args = parser.parse_args()
     device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
     args.device = device
+    os.environ["WANDB_DISABLED"] = str(args.wandb)
+    
     return args
 # def evaluate_jaccard(outputs, targets):
 #     eps = 1e-15

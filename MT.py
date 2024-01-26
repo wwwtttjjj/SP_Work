@@ -52,7 +52,7 @@ def train_epoch(phase, epoch, model, ema_model, dataloader):
         ema_model.train()
 
     for data in progress_bar:
-        volume_batch, label_batch, superPixelLabel, name = data["image"], data["mask"], data['superpixel'],data['name']
+        volume_batch, label_batch = data["image"], data["mask"]
         volume_batch = volume_batch.to(args.device, dtype=torch.float32)
         targets = label_batch.to(args.device, dtype=torch.long)
 
@@ -61,12 +61,10 @@ def train_epoch(phase, epoch, model, ema_model, dataloader):
         outputs = model(volume_batch)
         outputs_soft = torch.sigmoid(outputs)
         
-        '''add'''
-        # _, labeled_targets = getMask01(labeled_targets, superPixelLabel[:args.labeled_bs].squeeze(dim=1),args)
         labeled_sup_loss = torch.mean(loss_fn(outputs_soft[:args.labeled_bs], labeled_targets)) + dice_loss(outputs_soft[:args.labeled_bs], labeled_targets.unsqueeze(1))
         
         consistency_weight = get_current_consistency_weight(args,iter_num // 150)
-        if epoch <= 50:
+        if epoch <= args.epoch_unlabeled:
             consistency_loss = torch.tensor(0,dtype=float)
         else:
             # '''ema input'''
