@@ -15,7 +15,7 @@ from same_function import get_args,val_epoch,available_conditioning
 import ipdb
 import wandb
 import os
-# os.environ["WANDB_DISABLED"] = "true"
+os.environ["WANDB_DISABLED"] = "true"
 
 
 "wandb initial"
@@ -45,7 +45,7 @@ def get_data(args):
 
 
 	dataloaders = {}
-	dataloaders["train"] = DataLoader(db_train,num_workers=0, pin_memory=True)
+	dataloaders["train"] = DataLoader(db_train,batch_size=args.batch_size,num_workers=0, pin_memory=True)
 	dataloaders["validation"] = DataLoader(db_val, batch_size=1, num_workers=0, pin_memory=True, shuffle=False)
 	return dataloaders,total_slices
 
