@@ -39,8 +39,9 @@ args.save_last_name = save_last_name
 
 "wandb initial"
 experiment = wandb.init(project='SP',name='SP_test'+str(args.label_unlabel), resume='allow', anonymous='must')
+experiment.config.update(dict(epochs=args.epochs, labeled_bs=args.labeled_bs,batch_size=args.batch_size))
 
-#The MT 
+#The Mean-teacher 
 def train_epoch(phase, epoch, model, ema_model, dataloader):
     progress_bar = tqdm(dataloader, desc="Epoch {} - {}".format(epoch, phase))
     training = phase == "train"
@@ -70,7 +71,7 @@ def train_epoch(phase, epoch, model, ema_model, dataloader):
         labeled_sup_loss = torch.mean(loss_fn(outputs_soft[:args.labeled_bs], labeled_targets)) + dice_loss(outputs_soft[:args.labeled_bs], labeled_targets.unsqueeze(1))
         
         consistency_weight = get_current_consistency_weight(args,iter_num // 150)
-        if epoch <= 50:
+        if epoch <= args.epoch_unlabeled:
             unlabeled_sup_loss = torch.tensor(0,dtype=float)
             consistency_loss = torch.tensor(0,dtype=float)
         else:
@@ -89,38 +90,28 @@ def train_epoch(phase, epoch, model, ema_model, dataloader):
             Mask01_expanded = Mask01.clone()
             Mask01_expanded = Mask01_expanded.unsqueeze(1).expand(-1, 2, -1, -1)
             #the loss of supervised loss on unlabeled data
-            predMaskRefine_oneHot = F.one_hot(predMaskRefine, 2).permute(0, 3, 1, 2).float()
+            # predMaskRefine_oneHot = F.one_hot(predMaskRefine, 2).permute(0, 3, 1, 2).float()
             
-            loss_pixel = bceLoss(outputs_soft[args.labeled_bs:], predMaskRefine_oneHot)
-            # ipdb.set_trace()
+            # loss_pixel = bceLoss(outputs_soft[args.labeled_bs:], predMaskRefine_oneHot)
+            # # ipdb.set_trace()
             
-            unlabeled_sup_loss = torch.sum(Mask01_expanded * loss_pixel) / torch.sum(Mask01_expanded + 1e-6) + dice_loss(Mask01_expanded*(outputs_soft[args.labeled_bs:]), (Mask01*predMaskRefine).unsqueeze(1))
+            # unlabeled_sup_loss = torch.sum(Mask01_expanded * loss_pixel) / torch.sum(Mask01_expanded + 1e-6) + dice_loss(Mask01_expanded*(outputs_soft[args.labeled_bs:]), (Mask01*predMaskRefine).unsqueeze(1))
             
             # unlabeled_sup_loss = torch.mean(loss_fn(outputs_soft[args.labeled_bs:], predMaskRefine)) #+ dice_loss(Mask01_expanded*(outputs_soft[args.labeled_bs:]), (Mask01*predMask).unsqueeze(1))
             #consistency loss on unlabeled data
-            inv_mask = (Mask01_expanded == 0)
+            # inv_mask = (Mask01_expanded == 0)
+            
             consistency_dist = softmax_mse_loss(outputs[args.labeled_bs:], ema_preds)
             # ipdb.set_trace()
-            consistency_loss = torch.sum(inv_mask*consistency_dist)/(torch.sum(inv_mask)+1e-16)
-            
-        '''wandb post data'''
-        experiment.log({
-                'labeled_image': wandb.Image(volume_batch[0].cpu()),
-                'Pred':wandb.Image(outputs_soft.argmax(dim=1)[0].float().cpu()),
-                'GT':wandb.Image(labeled_targets[0].float().cpu()),
-                'unlabeled_image':wandb.Image(volume_batch[1].cpu()),
-                'pred_mask':wandb.Image(predMask[0].float().cpu()),
-                'refine_mask':wandb.Image(predMaskRefine[0].float().cpu()),
-                'superpixel mask':wandb.Image(Mask01[0].float().cpu()),
-                })
+            consistency_loss = torch.sum(Mask01_expanded*consistency_dist)/(torch.sum(Mask01_expanded)+1e-16)
 
         # #hyper-parameters
-        # unlabeled_sup_loss = torch.tensor(0,dtype=float)
+        unlabeled_sup_loss = torch.tensor(0,dtype=float)
         # consistency_loss = torch.tensor(0,dtype=float)
         
         # # labeled_sup_loss *= 0.5
-        unlabeled_sup_loss *= consistency_weight
-        # consistency_loss *= consistency_weight
+        # unlabeled_sup_loss *= consistency_weight
+        consistency_loss *= consistency_weight
         total_loss = labeled_sup_loss + unlabeled_sup_loss + consistency_loss
 
         model.zero_grad()
@@ -149,7 +140,20 @@ def train_epoch(phase, epoch, model, ema_model, dataloader):
         "un_sup_losses": np.mean(un_sup_losses),
         "consistency_loss": np.mean(con_losses),
         "consistency_weight":consistency_weight,
-    })
+        'labeled_image': wandb.Image(volume_batch[0].cpu()),
+        'labeled_Pred':wandb.Image(outputs_soft.argmax(dim=1)[0].float().cpu()),
+        'labeled_GT':wandb.Image(labeled_targets[0].float().cpu()),
+        'learning_rate':model.lr
+    },step=epoch)
+        #wandb post data
+    if epoch > args.epoch_unlabeled:
+        experiment.log({
+                'unlabeled_image':wandb.Image(volume_batch[1].cpu()),
+                'unlabeled_GT':wandb.Image(labeled_targets[1].float().cpu()),
+                'pred_mask':wandb.Image(predMask[0].float().cpu()),
+                'refine_mask':wandb.Image(predMaskRefine[0].float().cpu()),
+                'superPixel_mask':wandb.Image(Mask01[0].float().cpu()),
+                },step=epoch)
     mean_loss = np.mean(total_losses)
     info = {"loss": mean_loss}
     return info
@@ -162,7 +166,7 @@ def main(args):
     dataloaders, _ = get_data(args)
 
     info = {}
-    epochs = range(0, 200)
+    epochs = range(0, args.epochs)
     best_metric = "dice"
     best_value = 0
     for epoch in epochs:

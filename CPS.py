@@ -73,8 +73,8 @@ def train_epoch(phase, epoch, model, ema_model, dataloader):
 
 
 		#supervised loss
-        loss1 = loss_fn(outputs1[:args.labeled_bs], labeled_targets)
-        loss2 = loss_fn(outputs2[:args.labeled_bs], labeled_targets)
+        loss1 = loss_fn(outputs1[:args.labeled_bs], labeled_targets)+ dice_loss(outputs_soft1[:args.labeled_bs], labeled_targets.unsqueeze(1))
+        loss2 = loss_fn(outputs2[:args.labeled_bs], labeled_targets)+ dice_loss(outputs_soft2[:args.labeled_bs], labeled_targets.unsqueeze(1))
         labeled_sup_loss = loss1 + loss2
         
         if epoch <= args.epoch_unlabeled:

@@ -9,15 +9,14 @@ from tqdm import tqdm
 from dataloaders.ISICload import ISIC
 import torch.backends.cudnn as cudnn
 from torch.nn.modules.loss import CrossEntropyLoss
-from same_function import get_args,val_epoch,available_conditioning,create_model
+from same_function import get_args,val_epoch,available_conditioning,create_model,worker_init_fn
 import ipdb
 import wandb
 from utils.losses import DiceLoss
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
 dice_loss = DiceLoss(2)
-"wandb initial"
-experiment = wandb.init(project='SP',name='LinKNet_test', resume='allow', anonymous='must')
+
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))  
 fs_observer = os.path.join(BASE_PATH, "results")
 if not os.path.exists(fs_observer):
@@ -35,6 +34,9 @@ args.save_last_name = save_last_name
 
 device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
 
+"wandb initial"
+experiment = wandb.init(project='SP',name='LinKNet'+str(args.baseline), resume='allow', anonymous='must')
+
 def get_data(args):
     train_preprocess_fn = available_conditioning["original"]
     val_preprocess_fn = available_conditioning['original']
@@ -50,8 +52,8 @@ def get_data(args):
     sampler = SubsetRandomSampler(subset_indices)
 
     dataloaders = {
-        "train": DataLoader(db_train, batch_size=args.labeled_bs, num_workers=0, pin_memory=True, sampler=sampler),
-        "validation": DataLoader(db_val, batch_size=1, num_workers=0, pin_memory=True, shuffle=False)
+        "train": DataLoader(db_train, batch_size=args.labeled_bs, num_workers=0, pin_memory=True, sampler=sampler,worker_init_fn=worker_init_fn),
+        "validation": DataLoader(db_val, batch_size=1, num_workers=0, pin_memory=True, shuffle=False,worker_init_fn=worker_init_fn)
     }
 
     return dataloaders,total_slices
@@ -104,7 +106,6 @@ def main(args, device):
     epochs = range(0, 200)
     best_metric = "dice"
     best_value = 0
-
 
     for epoch in epochs:
         info["train"] = train_epoch("train", epoch, model=model, dataloader=dataloaders["train"], loss_fn=loss_fn)

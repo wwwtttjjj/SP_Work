@@ -18,11 +18,13 @@ import ipdb
 import torch.nn as nn
 from lib.models import nnU_net
 import os
-
+import random
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--labeled_bs", type=int, default=2, help='labeled_batch_size')
     parser.add_argument("--max_iterations", type=int, default=15000,
+                        help="maxiumn iterations to train")
+    parser.add_argument("--epochs", type=int, default=200,
                         help="maxiumn epoch to train")
     ######################################################
     parser.add_argument('--consistency_type', type=str,
@@ -53,15 +55,12 @@ def get_args():
     parser.add_argument('--label_unlabel', type=str, default='100-1400', help='100-1400,300-1200,500-1000')
     parser.add_argument('--baseline', type=int, default=100, help='100, 1500')
     parser.add_argument('--epoch_unlabeled', type=int, default=50, help='when to start unlabeled data')
-    
-    parser.add_argument('--wandb', type=bool, default="true", help="wandb true or false")
-    
-    
-    parser.add_argument('--threshold', type=float, default=0.5, help="the threshold of winner (superPixel block)")
+    parser.add_argument('--notWan', type=str, default="true", help="wan true or false")
+    parser.add_argument('--threshold', type=float, default=0.8, help="the threshold of winner (superPixel block)")
     args = parser.parse_args()
     device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
     args.device = device
-    os.environ["WANDB_DISABLED"] = str(args.wandb)
+    os.environ["WANDB_DISABLED"] = str(args.notWan)
     
     return args
 # def evaluate_jaccard(outputs, targets):
@@ -140,7 +139,7 @@ def val_epoch(phase, epoch, model, dataloader,device, experiment, args):
     experiment.log({
         'dice': round(np.mean(dices), 5),
         "iou": round(np.mean(ioues), 5)
-    })
+    },step=epoch)
     if epoch >= 190:
         save_results(path = args.save_name, result = info, args = args)
         if epoch == 199:
@@ -166,8 +165,8 @@ def get_data(args):
 		labeled_idx, unlabeled_idx, args.batch_size, args.batch_size - args.labeled_bs)
 	dataloaders = {}
 	dataloaders["train"] = DataLoader(db_train, batch_sampler=batch_sampler,
-									  num_workers=0, pin_memory=True)
-	dataloaders["validation"] = DataLoader(db_val, batch_size=1, num_workers=0, pin_memory=True, shuffle=False)
+									  num_workers=0, pin_memory=True, worker_init_fn=worker_init_fn)
+	dataloaders["validation"] = DataLoader(db_val, batch_size=1, num_workers=0, pin_memory=True, shuffle=False,worker_init_fn=worker_init_fn)
 	return dataloaders,total_slices
 
 def save_results(path, result, args):
@@ -186,7 +185,9 @@ def update_ema_variables(model, ema_model, alpha, global_step):
 	alpha = min(1 - 1 / (global_step + 1), alpha)
 	for ema_param, param in zip(ema_model.parameters(), model.parameters()):
 		ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
-
+  
+def worker_init_fn(args, worker_id):
+    random.seed(args.seed + worker_id)
 # def create_model(args, ema = False):
 #     pool_op_kernel_sizes = [
 #         [2, 2],
